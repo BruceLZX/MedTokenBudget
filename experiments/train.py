@@ -100,15 +100,27 @@ class MedTokenBudgetTrainer:
             if self.scaler is not None:
                 with autocast():
                     loss, preds = self._forward_loss(images, labels, lesion_masks, budget)
+                if not torch.isfinite(loss):
+                    raise RuntimeError(f"Non-finite loss at epoch {self.current_epoch + 1}, batch {batch_idx}: {loss.item()}")
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.get_trainable_params(), max_norm=1.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.get_trainable_params(), max_norm=1.0)
+                if not torch.isfinite(grad_norm):
+                    raise RuntimeError(
+                        f"Non-finite gradient norm at epoch {self.current_epoch + 1}, batch {batch_idx}: {grad_norm.item()}"
+                    )
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
                 loss, preds = self._forward_loss(images, labels, lesion_masks, budget)
+                if not torch.isfinite(loss):
+                    raise RuntimeError(f"Non-finite loss at epoch {self.current_epoch + 1}, batch {batch_idx}: {loss.item()}")
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.get_trainable_params(), max_norm=1.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.get_trainable_params(), max_norm=1.0)
+                if not torch.isfinite(grad_norm):
+                    raise RuntimeError(
+                        f"Non-finite gradient norm at epoch {self.current_epoch + 1}, batch {batch_idx}: {grad_norm.item()}"
+                    )
                 self.optimizer.step()
 
             total_loss += loss.item()

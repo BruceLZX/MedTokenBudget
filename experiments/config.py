@@ -94,7 +94,7 @@ class TrainConfig:
     budget_anneal_epochs: int = 20
 
     # Mixed precision
-    use_amp: bool = True
+    use_amp: bool = False
 
     # Logging
     log_interval: int = 50
