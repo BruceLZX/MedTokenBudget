@@ -38,7 +38,8 @@ from typing import Dict, List, Optional
 
 import torch
 import numpy as np
-import timm  # For ViT backbones
+import timm
+import torch.nn.functional as F
 
 from config import (
     ExperimentConfig, RouterConfig, ModelConfig, DataConfig, TrainConfig,
@@ -315,5 +316,4 @@ def main():
 
 
 if __name__ == '__main__':
-    import torch.nn.functional as F
     main()

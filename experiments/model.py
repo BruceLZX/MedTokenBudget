@@ -108,84 +108,62 @@ class MedTokenBudget(nn.Module):
     def extract_patches(self, x: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Extract patch embeddings from frozen ViT backbone.
-
-        Args:
-            x: Input images [B, 3, H, W]
-
-        Returns:
-            patches: Patch embeddings [B, N, D]
-            attentions: Attention weights (if available) or None
+        Returns patches [B, N, D] and attention weights (or None).
         """
         with torch.no_grad():
-            # Different backbones have different interfaces
-            # We need the intermediate patch embeddings before the final head
-
-            if hasattr(self.backbone, 'get_intermediate_layers'):
-                # DINOv2
-                outputs = self.backbone.get_intermediate_layers(
-                    x, n=1, return_class_token=True
-                )
-                patches = outputs[0][0]  # Patch tokens without CLS
-                # Shape: [B, N+1, D] → remove CLS → [B, N, D]
-                if patches.shape[1] == self.num_patches + 1:
+            # DINOv2 (loaded via torch.hub)
+            if hasattr(self.backbone, 'forward_features'):
+                out = self.backbone.forward_features(x)
+                # DINOv2 forward_features returns [B, N+1, D] with CLS at position 0
+                if isinstance(out, dict):
+                    patches = out.get('x_norm_patchtokens', out.get('x_prenorm', list(out.values())[0]))
+                elif isinstance(out, (list, tuple)):
+                    patches = out[0]
+                else:
+                    patches = out
+                # Remove CLS token if present
+                if patches.dim() == 3 and patches.shape[1] == self.num_patches + 1:
                     patches = patches[:, 1:, :]
 
+            # timm ViT or similar
             elif hasattr(self.backbone, 'blocks'):
-                # timm ViT: forward through blocks manually
-                x = self.backbone.patch_embed(x)
+                h = self.backbone.patch_embed(x)
                 if self.backbone.cls_token is not None:
-                    cls_token = self.backbone.cls_token.expand(x.shape[0], -1, -1)
-                    x = torch.cat((cls_token, x), dim=1)
-                x = x + self.backbone.pos_embed
+                    cls_tok = self.backbone.cls_token.expand(h.shape[0], -1, -1)
+                    h = torch.cat((cls_tok, h), dim=1)
+                if hasattr(self.backbone, 'pos_embed'):
+                    h = h + self.backbone.pos_embed
+                for blk in self.backbone.blocks:
+                    h = blk(h)
+                patches = h[:, 1:, :]
 
-                attentions = []
-                for block in self.backbone.blocks:
-                    x = block(x)
-                    if hasattr(block, 'attn') and hasattr(block.attn, 'attn_weights'):
-                        attentions.append(block.attn.attn_weights)
-
-                patches = x[:, 1:, :]  # Remove CLS
-                # Get last layer attention
-                attn = attentions[-1] if attentions else None
-
-            elif hasattr(self.backbone, 'encoder'):
-                # SAM-style encoder
-                x = self.backbone.patch_embed(x)
-                if self.backbone.pos_embed is not None:
-                    x = x + self.backbone.pos_embed
-                patches = self.backbone.encoder(x)
-                attn = None
-
+            # Fallback: try calling backbone directly and strip CLS
             else:
-                # Generic: try forward_features
-                try:
-                    patches = self.backbone.forward_features(x)
-                    if isinstance(patches, (list, tuple)):
-                        patches = patches[0]
-                    if patches.dim() == 3 and patches.shape[1] == self.num_patches + 1:
-                        patches = patches[:, 1:, :]
-                except Exception:
-                    # Last resort: use the full model and extract manually
-                    # This is a fallback; user should implement proper extraction
-                    raise NotImplementedError(
-                        "Backbone interface not supported. "
-                        "Implement extract_patches() for your backbone."
-                    )
-                attn = None
+                out = self.backbone(x)
+                if isinstance(out, dict):
+                    patches = out.get('last_hidden_state', list(out.values())[0])
+                elif isinstance(out, (list, tuple)):
+                    patches = out[0]
+                else:
+                    patches = out
+                if patches.dim() == 3 and patches.shape[1] == self.num_patches + 1:
+                    patches = patches[:, 1:, :]
 
             # Ensure correct shape
-            if patches.dim() == 4:  # [B, H, W, D] → [B, N, D]
+            if patches.dim() == 4:  # [B, H, W, D]
                 patches = patches.flatten(1, 2)
             B, N, D = patches.shape
 
-            # Pad or truncate to expected num_patches
+            # Align to expected num_patches
             if N < self.num_patches:
                 padding = torch.zeros(B, self.num_patches - N, D, device=patches.device)
                 patches = torch.cat([patches, padding], dim=1)
             elif N > self.num_patches:
                 patches = patches[:, :self.num_patches, :]
 
-        return patches, None  # attn is None for now (extracting attention is model-specific)
+        # NOTE: attention extraction is model-specific and complex.
+        # For LATS, the pseudo-attention fallback (feature similarity) works well.
+        return patches, None
 
     def forward(
         self,
@@ -232,14 +210,11 @@ class MedTokenBudget(nn.Module):
 
         logits = self.head(pooled)
 
-        # CLS baseline logits (no pruning)
+        # CLS baseline logits (no pruning) — reuses patches from above, no extra forward
         cls_logits = None
         if self.use_cls_token and not self.training:
-            with torch.no_grad():
-                cls_patches, _ = self.extract_patches(x)
-                # Use all patches pooled
-                cls_pooled = cls_patches.mean(dim=1)
-                cls_logits = self.cls_head(cls_pooled)
+            cls_pooled = patches.mean(dim=1)  # reuse patches already extracted
+            cls_logits = self.cls_head(cls_pooled)
 
         output = {'logits': logits}
 

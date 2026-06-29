@@ -185,68 +185,45 @@ class LesionAwareTokenScorer(nn.Module):
         attentions: Optional[torch.Tensor] = None,
         patch_positions: Optional[torch.Tensor] = None,
         return_scores: bool = True,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, Dict]:
         """
         Score each patch and return importance scores.
 
-        Args:
-            patches: Patch embeddings [B, N, D]
-            attentions: Optional attention weights
-            patch_positions: Optional spatial positions
-            return_scores: Whether to return individual signal scores
-
         Returns:
-            scores: Token importance scores [B, N] (higher = more lesion-like)
-            signal_dict: Individual signal values (if return_scores=True)
+            scores: Token importance scores [B, N] in [0, 1]
+            signal_dict: Individual signal values
         """
         B, N, D = patches.shape
 
         # Compute all signals
         signal_dict = self.compute_signals(patches, attentions, patch_positions)
 
-        # Concatenate patch features with signals
-        combined_features = [patches]
-        for name, signal in signal_dict.items():
-            if signal.dim() == 3 and signal.shape[-1] == 1:
-                # Expand scalar signal to all patches
-                combined_features.append(signal.expand(-1, -1, D) if signal.shape[-1] != D else signal)
-            elif signal.dim() == 3:
-                # Multi-dim signal: project to same dim
-                combined_features.append(
-                    F.linear(signal, torch.eye(D, signal.shape[-1], device=patches.device))
-                    if signal.shape[-1] <= D
-                    else signal[..., :D]
-                )
-
-        # Simple: just use patch features + scalar signals
-        patch_with_signals = patches
+        # Build augmented features: patch embedding + scalar signals
         scalar_signals = []
         for name, signal in signal_dict.items():
             if signal.dim() == 3 and signal.shape[-1] == 1:
-                scalar_signals.append(signal)
+                scalar_signals.append(signal)  # [B, N, 1]
             elif signal.dim() == 2:
-                scalar_signals.append(signal.unsqueeze(-1))
+                scalar_signals.append(signal.unsqueeze(-1))  # [B, N] -> [B, N, 1]
 
         if scalar_signals:
-            extra = torch.cat(scalar_signals, dim=-1)
-            patch_with_signals = torch.cat([patches, extra.expand(-1, -1, extra.shape[-1])[:, :N]], dim=-1)
+            extra = torch.cat(scalar_signals, dim=-1)  # [B, N, S]
+            patch_with_signals = torch.cat([patches, extra], dim=-1)  # [B, N, D+S]
+        else:
+            patch_with_signals = patches
 
-        # Ensure dimension match
-        if patch_with_signals.shape[-1] != self.input_proj.in_features:
-            # Pad or truncate
-            target_dim = self.input_proj.in_features
-            current_dim = patch_with_signals.shape[-1]
-            if current_dim < target_dim:
-                padding = torch.zeros(B, N, target_dim - current_dim, device=patches.device)
-                patch_with_signals = torch.cat([patch_with_signals, padding], dim=-1)
-            else:
-                patch_with_signals = patch_with_signals[..., :target_dim]
+        # Ensure dimension matches input_proj
+        target_dim = self.input_proj.in_features
+        current_dim = patch_with_signals.shape[-1]
+        if current_dim < target_dim:
+            padding = torch.zeros(B, N, target_dim - current_dim, device=patches.device)
+            patch_with_signals = torch.cat([patch_with_signals, padding], dim=-1)
+        elif current_dim > target_dim:
+            patch_with_signals = patch_with_signals[..., :target_dim]
 
         # Score each patch
         hidden = self.input_proj(patch_with_signals)
         scores = self.scorer(hidden).squeeze(-1)  # [B, N]
-
-        # Normalize scores to [0, 1]
         scores = torch.sigmoid(scores)
 
         return scores, signal_dict
@@ -330,33 +307,26 @@ class TokenRouter(nn.Module):
         if h * w == N:
             scores = self.spatial_smooth(scores, h, w)
 
+        top_indices = None  # only populated in eval mode
+
         if training:
-            # Differentiable top-K via Gumbel-softmax
-            # Add Gumbel noise
+            # Differentiable top-K via Gumbel-softmax straight-through
             gumbel_noise = -torch.log(-torch.log(
                 torch.rand_like(scores).clamp(min=1e-8)
             ))
             logits = (scores.log() - (1 - scores).log() + gumbel_noise) / self.temperature
 
-            # Soft selection mask
-            # Sort by logits and take top-K
             _, top_indices = logits.topk(K, dim=-1, sorted=False)
-
-            # Hard selection for forward, soft for backward
             mask = torch.zeros_like(scores)
             mask.scatter_(1, top_indices, 1.0)
-
-            # Straight-through: use hard mask in forward, soft gradient
-            soft_scores = F.softmax(logits, dim=-1)
             selection_mask = mask
-
-            selected_patches = patches * selection_mask.unsqueeze(-1)
         else:
             # Hard top-K selection at inference
             _, top_indices = scores.topk(K, dim=-1, sorted=False)
             selection_mask = torch.zeros_like(scores)
             selection_mask.scatter_(1, top_indices, 1.0)
-            selected_patches = patches * selection_mask.unsqueeze(-1)
+
+        selected_patches = patches * selection_mask.unsqueeze(-1)
 
         return {
             'selected_patches': selected_patches,

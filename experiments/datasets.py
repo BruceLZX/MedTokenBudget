@@ -12,8 +12,6 @@ from typing import Dict, Optional, Tuple, List
 import numpy as np
 from PIL import Image
 import logging
-import os
-import sys
 import zipfile
 import shutil
 
