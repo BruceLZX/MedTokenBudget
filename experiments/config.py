@@ -103,6 +103,7 @@ class TrainConfig:
     eval_interval: int = 2
     save_best: bool = True
     early_stopping_patience: Optional[int] = 12
+    early_stopping_min_delta: float = 0.002
 
 
 @dataclass

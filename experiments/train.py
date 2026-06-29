@@ -275,7 +275,8 @@ class MedTokenBudgetTrainer:
                         f"Val F1: {val_metrics['macro_f1']:.4f}"
                     )
 
-                    if val_metrics['accuracy'] > self.best_val_acc:
+                    min_delta = getattr(self.config.train, 'early_stopping_min_delta', 0.0)
+                    if val_metrics['accuracy'] > self.best_val_acc + min_delta:
                         self.best_val_acc = val_metrics['accuracy']
                         self.best_epoch = epoch
                         if self.config.train.save_best:
@@ -285,7 +286,7 @@ class MedTokenBudgetTrainer:
                         if stale >= self.config.train.early_stopping_patience:
                             logger.info(
                                 f"Early stopping at epoch {epoch+1}: "
-                                f"no val acc improvement for {stale} epochs"
+                                f"no val acc improvement > {min_delta:.4f} for {stale} epochs"
                             )
                             break
 
