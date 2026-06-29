@@ -325,7 +325,8 @@ class TokenRouter(nn.Module):
             gumbel_noise = -torch.log(-torch.log(
                 torch.rand_like(scores).clamp(min=1e-8)
             ))
-            logits = (scores.log() - (1 - scores).log() + gumbel_noise) / self.temperature
+            score_logits = torch.logit(scores.clamp(min=1e-4, max=1 - 1e-4))
+            logits = (score_logits + gumbel_noise) / self.temperature
 
             _, top_indices = logits.topk(K, dim=-1, sorted=False)
             hard_mask = torch.zeros_like(scores)
