@@ -17,6 +17,12 @@ Usage:
     # Budget sweep
     python run_experiments.py --mode sweep --dataset isic
 
+    # Resume interrupted training (auto-finds latest checkpoint)
+    python run_experiments.py --mode full --resume auto
+
+    # Resume from specific checkpoint
+    python run_experiments.py --mode full --resume results/med_token_budget/interrupted.pt
+
     # All experiments
     python run_experiments.py --mode all
 """
@@ -198,6 +204,8 @@ def main():
     parser.add_argument('--output_dir', default='./results/med_token_budget')
     parser.add_argument('--device', default='cuda')
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--resume', type=str, default=None,
+                       help='Resume from checkpoint ("auto" = find latest, or path to .pt)')
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -268,8 +276,24 @@ def main():
     trainer = MedTokenBudgetTrainer(model, config, device)
 
     if args.mode in ['quick', 'full', 'all']:
-        logger.info("Starting training...")
-        history = trainer.train(dataloaders['train'], dataloaders['val'])
+        # Check for resume
+        resume_path = None
+        if args.resume == 'auto':
+            resume_path = trainer.find_latest_checkpoint()
+            if resume_path:
+                logger.info(f"🔍 Found checkpoint: {resume_path}")
+            else:
+                logger.info("No checkpoint found — starting fresh.")
+        elif args.resume:
+            resume_path = args.resume
+
+        if resume_path and Path(resume_path).exists():
+            logger.info(f"🔄 Resuming from: {resume_path}")
+            trainer.resume(resume_path, dataloaders['train'], dataloaders['val'])
+        else:
+            logger.info("Starting training...")
+            trainer.train(dataloaders['train'], dataloaders['val'])
+
         trainer.save_checkpoint('final_model.pt')
 
     # Budget sweep
