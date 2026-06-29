@@ -160,11 +160,21 @@ class LesionAwareTokenScorer(nn.Module):
             else:
                 # Use high-pass filter in feature space
                 # High-freq ≈ large difference from neighbors
-                sim = F.cosine_similarity(
-                    patches[:, :-1], patches[:, 1:], dim=-1
-                )
-                # Low similarity with neighbors → high frequency
-                freq_score = (1.0 - sim).unsqueeze(-1)
+                freq_score = torch.zeros(B, N, device=device)
+                if N > 1:
+                    sim = F.cosine_similarity(
+                        patches[:, :-1], patches[:, 1:], dim=-1
+                    )
+                    # Low similarity with neighbors → high frequency.
+                    # Convert N-1 pair scores into N per-token scores.
+                    pair_score = 1.0 - sim
+                    counts = torch.zeros(B, N, device=device)
+                    freq_score[:, :-1] += pair_score
+                    freq_score[:, 1:] += pair_score
+                    counts[:, :-1] += 1
+                    counts[:, 1:] += 1
+                    freq_score = freq_score / counts.clamp(min=1)
+                freq_score = freq_score.unsqueeze(-1)
                 freq_feat = self.freq_proj(patches) * freq_score
                 signals['frequency'] = freq_feat
 
@@ -332,7 +342,7 @@ class TokenRouter(nn.Module):
             'selected_patches': selected_patches,
             'selected_indices': top_indices if not training else None,
             'selection_mask': selection_mask,
-            'kept_ratio': K / N,
+            'kept_ratio': patches.new_full((B,), K / N),
             'num_kept': K,
             'scores': scores,
         }
