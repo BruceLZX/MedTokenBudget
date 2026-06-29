@@ -455,10 +455,12 @@ def run_budget_sweep(
     val_loader,
     trainer: MedTokenBudgetTrainer,
     config: ExperimentConfig,
-    budgets: List[float] = [0.1, 0.25, 0.5, 0.75, 1.0],
+    budgets: List[float] = None,
     baselines: List[str] = None,
 ):
     """Evaluate accuracy across token budgets with fair independently trained heads."""
+    if budgets is None:
+        budgets = [round(x / 10, 1) for x in range(1, 11)]
     if baselines is None:
         baselines = ['no_pruning', 'random', 'norm_based', 'tome', 'attention_entropy', 'local_contrast', 'lats']
 
@@ -712,7 +714,7 @@ def main():
     # Budget sweep
     if args.mode in ['sweep', 'all']:
         logger.info("Running budget sweep...")
-        budgets = [0.1, 0.25, 0.5, 0.75, 1.0]
+        budgets = [round(x / 10, 1) for x in range(1, 11)]
         sweep_results = run_budget_sweep(
             model,
             dataloaders['train'],
