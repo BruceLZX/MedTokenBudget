@@ -117,7 +117,7 @@ def download_isic_2019(data_dir: Path) -> Path:
         img_zip = data_dir / "isic" / "ISIC_2019_Training_Input.zip"
         _download_file(
             "https://isic-challenge-data.s3.amazonaws.com/2019/ISIC_2019_Training_Input.zip",
-            img_zip, desc="ISIC 2019 images (5.2 GB)"
+            img_zip, desc="ISIC 2019 images (9.3 GB)"
         )
         # Extract to isic_dir (zip has ISIC_2019_Training_Input/ internally)
         _extract_zip(img_zip, isic_dir, desc="Extracting ISIC images")
@@ -149,7 +149,18 @@ def download_isic_2018_task1_masks(data_dir: Path) -> Optional[Path]:
             zip_path,
             desc="ISIC 2018 Task1 masks (26 MB)",
         )
-        _extract_zip(zip_path, data_dir / "isic", desc="Extracting ISIC 2018 masks")
+        logger.info(f"Extracting ISIC 2018 masks -> {data_dir / 'isic'}")
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            members = zf.namelist()
+            for i, member in enumerate(members):
+                zf.extract(member, data_dir / "isic")
+                if i % 100 == 0 or i == len(members) - 1:
+                    pct = (i + 1) / len(members) * 100
+                    print(
+                        f"\r  Extracting ISIC 2018 masks: {i+1}/{len(members)} files ({pct:.0f}%)",
+                        end='', flush=True,
+                    )
+        print()
         zip_path.unlink(missing_ok=True)
     except Exception as exc:
         logger.warning(f"Could not download ISIC 2018 masks for retention analysis: {exc}")
