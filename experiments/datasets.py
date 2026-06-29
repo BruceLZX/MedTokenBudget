@@ -155,11 +155,16 @@ def download_brisc(data_dir: Path) -> Path:
     # Direct download URL
     zip_path = data_dir / "brisc2025.zip"
     if not has_brisc_classes(brisc_dir):
+        if zip_path.exists() and not zipfile.is_zipfile(zip_path):
+            logger.warning(f"Removing invalid BRISC archive: {zip_path}")
+            zip_path.unlink()
         _download_file(
-            "https://figshare.com/ndownloader/files/55678923",
+            "https://ndownloader.figshare.com/files/59298329",
             zip_path,
-            desc="BRISC brain MRI (1.2 GB)"
+            desc="BRISC brain MRI (260 MB)"
         )
+        if not zipfile.is_zipfile(zip_path):
+            raise zipfile.BadZipFile(f"Downloaded BRISC archive is not a zip file: {zip_path}")
         _extract_zip(zip_path, brisc_dir, desc="Extracting BRISC")
         zip_path.unlink(missing_ok=True)
 
