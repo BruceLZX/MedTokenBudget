@@ -116,7 +116,7 @@ class ExperimentConfig:
 
     # Baseline comparisons
     baselines: List[str] = field(default_factory=lambda: [
-        "no_pruning", "random", "dynamic_vit", "tome", "evit", "lats"
+        "no_pruning", "random", "dynamic_vit", "tome", "evit", "freq_aware", "lats"
     ])
 
 

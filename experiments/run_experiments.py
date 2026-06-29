@@ -40,6 +40,7 @@ import torch
 import numpy as np
 import timm
 import torch.nn.functional as F
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
 
 from config import (
     ExperimentConfig, RouterConfig, ModelConfig, DataConfig, TrainConfig,
@@ -159,6 +160,88 @@ def tome_merging(patches: torch.Tensor, budget: float) -> torch.Tensor:
     return selected
 
 
+def frequency_aware_scores(patches: torch.Tensor) -> torch.Tensor:
+    """Training-free high-frequency proxy from neighboring patch differences."""
+    B, N, _ = patches.shape
+    scores = torch.zeros(B, N, device=patches.device)
+    if N <= 1:
+        return scores
+    sim = F.cosine_similarity(patches[:, :-1], patches[:, 1:], dim=-1)
+    pair_score = 1.0 - sim
+    counts = torch.zeros(B, N, device=patches.device)
+    scores[:, :-1] += pair_score
+    scores[:, 1:] += pair_score
+    counts[:, :-1] += 1
+    counts[:, 1:] += 1
+    return scores / counts.clamp(min=1)
+
+
+def pool_topk(patches: torch.Tensor, scores: torch.Tensor, budget: float, min_tokens: int) -> torch.Tensor:
+    """Pool selected top-K patches with the same mean-pooling contract as LATS."""
+    B, N, D = patches.shape
+    K = min(N, max(min_tokens, int(N * budget)))
+    _, indices = scores.topk(K, dim=-1, sorted=False)
+    mask = torch.zeros(B, N, device=patches.device)
+    mask.scatter_(1, indices, 1.0)
+    return (patches * mask.unsqueeze(-1)).sum(dim=1) / mask.sum(dim=1, keepdim=True).clamp(min=1)
+
+
+@torch.no_grad()
+def evaluate_selection_baseline(
+    model: MedTokenBudget,
+    val_loader,
+    device: str,
+    budget: float,
+    method: str,
+) -> Dict[str, float]:
+    """Evaluate training-free token selection baselines with the trained head."""
+    model.eval()
+    all_preds, all_labels = [], []
+    total_loss = 0.0
+    min_tokens = model.router.min_tokens
+
+    for batch in val_loader:
+        images, labels = batch[:2]
+        images = images.to(device)
+        labels = labels.to(device)
+        patches, attentions = model.extract_patches(images)
+
+        if method == 'no_pruning':
+            pooled = patches.mean(dim=1)
+        elif method == 'random':
+            scores = torch.rand(patches.shape[:2], device=device)
+            pooled = pool_topk(patches, scores, budget, min_tokens)
+        elif method == 'dynamic_vit':
+            scores = patches.norm(dim=-1)
+            pooled = pool_topk(patches, scores, budget, min_tokens)
+        elif method == 'tome':
+            pooled = tome_merging(patches, budget).mean(dim=1)
+        elif method == 'evit':
+            signals = model.scorer.compute_signals(patches, attentions)
+            scores = signals['attention'].squeeze(-1)
+            pooled = pool_topk(patches, scores, budget, min_tokens)
+        elif method == 'freq_aware':
+            scores = frequency_aware_scores(patches)
+            pooled = pool_topk(patches, scores, budget, min_tokens)
+        else:
+            raise ValueError(f"Unknown baseline: {method}")
+
+        logits = model.head(pooled)
+        total_loss += F.cross_entropy(logits, labels).item()
+        all_preds.append(logits.cpu())
+        all_labels.append(labels.cpu())
+
+    all_preds = torch.cat(all_preds).argmax(-1).numpy()
+    all_labels = torch.cat(all_labels).numpy()
+    return {
+        'loss': total_loss / len(val_loader),
+        'accuracy': accuracy_score(all_labels, all_preds),
+        'balanced_accuracy': balanced_accuracy_score(all_labels, all_preds),
+        'macro_f1': f1_score(all_labels, all_preds, average='macro'),
+        'weighted_f1': f1_score(all_labels, all_preds, average='weighted'),
+    }
+
+
 # ─── Budget Sweep ────────────────────────────────────────────────────
 
 def run_budget_sweep(
@@ -170,7 +253,7 @@ def run_budget_sweep(
 ):
     """Evaluate accuracy across token budgets."""
     if baselines is None:
-        baselines = ['no_pruning', 'random', 'dynamic_vit', 'tome', 'evit', 'lats']
+        baselines = ['no_pruning', 'random', 'dynamic_vit', 'tome', 'evit', 'freq_aware', 'lats']
 
     results = {b: {} for b in budgets}
 
@@ -182,20 +265,30 @@ def run_budget_sweep(
         lats_metrics = trainer.validate(val_loader, budget=budget)
         results[budget]['lats'] = lats_metrics
 
-        # Baselines (no-pruning = budget 1.0)
-        if budget == 1.0:
-            results[budget]['no_pruning'] = lats_metrics  # Same
-        else:
-            # Placeholder: run baseline evaluations
-            # In practice, need separate forward passes with each method
-            results[budget]['random'] = {'accuracy': 0.0}  # placeholder
-            results[budget]['dynamic_vit'] = {'accuracy': 0.0}
-            results[budget]['tome'] = {'accuracy': 0.0}
-            results[budget]['evit'] = {'accuracy': 0.0}
+        for baseline in baselines:
+            if baseline == 'lats':
+                continue
+            baseline_metrics = evaluate_selection_baseline(
+                model, val_loader, trainer.device, budget, baseline
+            )
+            results[budget][baseline] = baseline_metrics
+            logger.info(f"  {baseline} Acc: {baseline_metrics['accuracy']:.4f} | "
+                        f"F1: {baseline_metrics['macro_f1']:.4f}")
 
         logger.info(f"  LATS Acc: {lats_metrics['accuracy']:.4f}")
 
     return results
+
+
+def find_eval_checkpoint(output_dir: str) -> Optional[str]:
+    """Find a trained checkpoint for evaluation-only modes."""
+    output_dir = Path(output_dir)
+    for name in ['best_model.pt', 'latest.pt', 'final_model.pt']:
+        path = output_dir / name
+        if path.exists():
+            return str(path)
+    autos = sorted(output_dir.glob('auto_epoch_*.pt'), key=lambda x: x.stat().st_mtime, reverse=True)
+    return str(autos[0]) if autos else None
 
 
 # ─── Main ────────────────────────────────────────────────────────────
@@ -279,6 +372,18 @@ def main():
 
     # Train
     trainer = MedTokenBudgetTrainer(model, config, device)
+
+    if args.mode == 'sweep':
+        resume_path = args.resume
+        if resume_path is None or resume_path == 'auto':
+            resume_path = find_eval_checkpoint(args.output_dir)
+        if not resume_path or not Path(resume_path).exists():
+            raise FileNotFoundError(
+                f"Sweep requires a trained checkpoint in {args.output_dir}. "
+                "Pass --resume PATH or upload best_model.pt/latest.pt."
+            )
+        logger.info(f"Loading checkpoint for sweep: {resume_path}")
+        trainer.load_checkpoint(resume_path)
 
     if args.mode in ['quick', 'full', 'all']:
         # Check for resume
