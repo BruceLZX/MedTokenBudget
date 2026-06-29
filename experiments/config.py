@@ -66,9 +66,10 @@ class DataConfig:
 
     # Training
     batch_size: int = 64
-    num_workers: int = 4
+    num_workers: int = 2
     train_split: float = 0.8
     augment: bool = True
+    include_lesion_masks: bool = True
 
 
 @dataclass
@@ -92,6 +93,7 @@ class TrainConfig:
     budget_start: float = 0.5          # Start at 50% (force scorer to learn early)
     budget_end: float = 0.25
     budget_anneal_epochs: int = 20
+    budget_schedule: Literal["cosine", "linear"] = "cosine"
 
     # Mixed precision
     use_amp: bool = False
@@ -100,6 +102,7 @@ class TrainConfig:
     log_interval: int = 50
     eval_interval: int = 2
     save_best: bool = True
+    early_stopping_patience: Optional[int] = 12
 
 
 @dataclass
@@ -118,8 +121,9 @@ class ExperimentConfig:
 
     # Baseline comparisons
     baselines: List[str] = field(default_factory=lambda: [
-        "no_pruning", "random", "dynamic_vit", "tome", "evit", "freq_aware", "lats"
+        "no_pruning", "random", "norm_based", "tome", "attention_entropy", "local_contrast", "lats"
     ])
+    baseline_head_epochs: int = 5
 
 
 # Presets
@@ -132,7 +136,7 @@ ISIC_BASELINE = ExperimentConfig(
 BRISC_BASELINE = ExperimentConfig(
     name="brisc_baseline",
     data=DataConfig(dataset="brisc"),
-    model=ModelConfig(num_classes=4, backbone="medmae"),
+    model=ModelConfig(num_classes=4, backbone="dino_v2"),
 )
 
 MEDMNIST_QUICK = ExperimentConfig(

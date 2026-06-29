@@ -140,43 +140,17 @@ class LesionAwareTokenScorer(nn.Module):
 
         # Signal 3: Frequency Content
         if self.use_frequency_content:
-            # Approximate frequency content via feature variance in local neighborhood
-            # Reshape to 2D grid if positions available
-            if patch_positions is not None:
-                # Use actual spatial positions
-                h = w = int(math.sqrt(N))
-                if h * w == N:
-                    patches_2d = patches.reshape(B, h, w, D)
-                    # Compute local variance (high-freq proxy)
-                    local_var = F.avg_pool2d(
-                        patches_2d.permute(0, 3, 1, 2),
-                        kernel_size=3, stride=1, padding=1
-                    )
-                    local_var = (patches_2d - local_var.permute(0, 2, 3, 1)).pow(2).mean(dim=-1)
-                    freq_feat = self.freq_proj(local_var.reshape(B, N))
-                    signals['frequency'] = freq_feat  # [B, N, D//16]
-                else:
-                    signals['frequency'] = torch.zeros(B, N, self.embed_dim // 16, device=device)
-            else:
-                # Use high-pass filter in feature space
-                # High-freq ≈ large difference from neighbors
-                freq_score = torch.zeros(B, N, device=device)
-                if N > 1:
-                    sim = F.cosine_similarity(
-                        patches[:, :-1], patches[:, 1:], dim=-1
-                    )
-                    # Low similarity with neighbors → high frequency.
-                    # Convert N-1 pair scores into N per-token scores.
-                    pair_score = 1.0 - sim
-                    counts = torch.zeros(B, N, device=device)
-                    freq_score[:, :-1] += pair_score
-                    freq_score[:, 1:] += pair_score
-                    counts[:, :-1] += 1
-                    counts[:, 1:] += 1
-                    freq_score = freq_score / counts.clamp(min=1)
-                freq_score = freq_score.unsqueeze(-1)
-                freq_feat = self.freq_proj(patches) * freq_score
-                signals['frequency'] = freq_feat
+            freq_score = torch.zeros(B, N, device=device)
+            if N > 1:
+                sim = F.cosine_similarity(patches[:, :-1], patches[:, 1:], dim=-1)
+                pair_score = 1.0 - sim
+                counts = torch.zeros(B, N, device=device)
+                freq_score[:, :-1] += pair_score
+                freq_score[:, 1:] += pair_score
+                counts[:, :-1] += 1
+                counts[:, 1:] += 1
+                freq_score = freq_score / counts.clamp(min=1)
+            signals['frequency'] = self.freq_proj(patches) * freq_score.unsqueeze(-1)
 
         # Signal 4: GradCAM Attribution (computed externally, passed through)
         if self.use_gradcam:
@@ -208,16 +182,16 @@ class LesionAwareTokenScorer(nn.Module):
         # Compute all signals
         signal_dict = self.compute_signals(patches, attentions, patch_positions)
 
-        # Build augmented features: patch embedding + scalar signals
-        scalar_signals = []
+        # Build augmented features: patch embedding + all enabled signals.
+        signal_features = []
         for name, signal in signal_dict.items():
-            if signal.dim() == 3 and signal.shape[-1] == 1:
-                scalar_signals.append(signal)  # [B, N, 1]
+            if signal.dim() == 3:
+                signal_features.append(signal)  # [B, N, C]
             elif signal.dim() == 2:
-                scalar_signals.append(signal.unsqueeze(-1))  # [B, N] -> [B, N, 1]
+                signal_features.append(signal.unsqueeze(-1))  # [B, N] -> [B, N, 1]
 
-        if scalar_signals:
-            extra = torch.cat(scalar_signals, dim=-1)  # [B, N, S]
+        if signal_features:
+            extra = torch.cat(signal_features, dim=-1)  # [B, N, S]
             patch_with_signals = torch.cat([patches, extra], dim=-1)  # [B, N, D+S]
         else:
             patch_with_signals = patches
@@ -313,7 +287,8 @@ class TokenRouter(nn.Module):
         K = min(K, N)
 
         # Spatial smoothing
-        h = w = int(math.sqrt(N))
+        h = int(math.sqrt(N))
+        w = N // h if h > 0 and N % h == 0 else h
         if h * w == N:
             scores = self.spatial_smooth(scores, h, w)
 

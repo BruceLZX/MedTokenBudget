@@ -27,7 +27,7 @@ class MedTokenBudget(nn.Module):
         backbone: nn.Module,
         embed_dim: int = 768,
         num_classes: int = 8,
-        num_patches: int = 196,  # 224/16 = 14, 14^2 = 196
+        num_patches: int = 196,
         router_config: Optional[Dict] = None,
         head_config: Optional[Dict] = None,
     ):
@@ -98,30 +98,54 @@ class MedTokenBudget(nn.Module):
                 nn.Linear(head_hidden // 2, num_classes),
             )
 
-        # CLS token handling
-        self.use_cls_token = True
-        self.cls_head = nn.Linear(embed_dim, num_classes)  # For no-pruning baseline
-
         # Budget for current forward pass (can be overridden)
         self.current_budget = router_config.get('token_budget_ratio', 0.5)
+
+    def _attention_from_block(self, block: nn.Module, tokens: torch.Tensor) -> Optional[torch.Tensor]:
+        """Return last-block attention weights when the backbone exposes qkv."""
+        attn_mod = getattr(block, "attn", None)
+        qkv_layer = getattr(attn_mod, "qkv", None)
+        if attn_mod is None or qkv_layer is None:
+            return None
+
+        B, N, C = tokens.shape
+        num_heads = getattr(attn_mod, "num_heads", None)
+        if num_heads is None:
+            return None
+        head_dim = C // num_heads
+        scale = getattr(attn_mod, "scale", head_dim ** -0.5)
+        qkv = qkv_layer(tokens).reshape(B, N, 3, num_heads, head_dim).permute(2, 0, 3, 1, 4)
+        q, k = qkv[0], qkv[1]
+        return (q @ k.transpose(-2, -1) * scale).softmax(dim=-1)
 
     def extract_patches(self, x: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Extract patch embeddings from frozen ViT backbone.
         Returns patches [B, N, D] and attention weights (or None).
         """
+        attentions = None
         with torch.no_grad():
             # DINOv2 (loaded via torch.hub)
-            if hasattr(self.backbone, 'forward_features'):
+            if hasattr(self.backbone, 'prepare_tokens_with_masks') and hasattr(self.backbone, 'blocks'):
+                tokens = self.backbone.prepare_tokens_with_masks(x, None)
+                for blk in self.backbone.blocks[:-1]:
+                    tokens = blk(tokens)
+                attentions = self._attention_from_block(self.backbone.blocks[-1], tokens)
+                tokens = self.backbone.blocks[-1](tokens)
+                if hasattr(self.backbone, 'norm'):
+                    tokens = self.backbone.norm(tokens)
+                patches = tokens[:, 1:, :]
+
+            elif hasattr(self.backbone, 'forward_features'):
                 out = self.backbone.forward_features(x)
-                # DINOv2 forward_features returns [B, N+1, D] with CLS at position 0
                 if isinstance(out, dict):
-                    patches = out.get('x_norm_patchtokens', out.get('x_prenorm', list(out.values())[0]))
+                    patches = out.get('x_norm_patchtokens')
+                    if patches is None:
+                        patches = out.get('x_prenorm', list(out.values())[0])
                 elif isinstance(out, (list, tuple)):
                     patches = out[0]
                 else:
                     patches = out
-                # Remove CLS token if present
                 if patches.dim() == 3 and patches.shape[1] == self.num_patches + 1:
                     patches = patches[:, 1:, :]
 
@@ -133,8 +157,14 @@ class MedTokenBudget(nn.Module):
                     h = torch.cat((cls_tok, h), dim=1)
                 if hasattr(self.backbone, 'pos_embed'):
                     h = h + self.backbone.pos_embed
-                for blk in self.backbone.blocks:
+                if hasattr(self.backbone, 'pos_drop'):
+                    h = self.backbone.pos_drop(h)
+                for blk in self.backbone.blocks[:-1]:
                     h = blk(h)
+                attentions = self._attention_from_block(self.backbone.blocks[-1], h)
+                h = self.backbone.blocks[-1](h)
+                if hasattr(self.backbone, 'norm'):
+                    h = self.backbone.norm(h)
                 patches = h[:, 1:, :]
 
             # Fallback: try calling backbone directly and strip CLS
@@ -160,10 +190,11 @@ class MedTokenBudget(nn.Module):
                 patches = torch.cat([patches, padding], dim=1)
             elif N > self.num_patches:
                 patches = patches[:, :self.num_patches, :]
+                if attentions is not None:
+                    keep = self.num_patches + 1
+                    attentions = attentions[:, :, :keep, :keep]
 
-        # NOTE: attention extraction is model-specific and complex.
-        # For LATS, the pseudo-attention fallback (feature similarity) works well.
-        return patches, None
+        return patches, attentions
 
     def forward(
         self,
@@ -206,15 +237,9 @@ class MedTokenBudget(nn.Module):
 
         # Option 1: Pool selected patches (mean pooling of kept patches)
         kept_count = mask.sum(dim=1).clamp(min=1)  # [B, 1, 1]
-        pooled = (selected * mask).sum(dim=1) / kept_count  # [B, D]
+        pooled = selected.sum(dim=1) / kept_count  # [B, D]
 
         logits = self.head(pooled)
-
-        # CLS baseline logits (no pruning) — reuses patches from above, no extra forward
-        cls_logits = None
-        if self.use_cls_token and not self.training:
-            cls_pooled = patches.mean(dim=1)  # reuse patches already extracted
-            cls_logits = self.cls_head(cls_pooled)
 
         output = {'logits': logits}
 
@@ -222,6 +247,7 @@ class MedTokenBudget(nn.Module):
             output.update({
                 'scores': scores,
                 'patches': patches,  # needed for attention distillation loss
+                'attentions': attentions,
                 'selection_mask': route_result['selection_mask'],
                 'kept_ratio': route_result['kept_ratio'],
                 'num_kept': route_result['num_kept'],
@@ -233,7 +259,6 @@ class MedTokenBudget(nn.Module):
                 'patches': patches,
                 'selected_patches': selected,
                 'pooled': pooled,
-                'cls_logits': cls_logits,
             })
 
         return output
