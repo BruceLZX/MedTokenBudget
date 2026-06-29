@@ -138,16 +138,23 @@ def download_brisc(data_dir: Path) -> Path:
     brisc_dir = data_dir / "brisc"
     marker = brisc_dir / ".downloaded"
 
-    if marker.exists():
+    def has_brisc_classes(path: Path) -> bool:
+        task_dir = path / "classification_task"
+        return (task_dir / "train").exists() and (task_dir / "test").exists()
+
+    if marker.exists() and has_brisc_classes(brisc_dir):
         logger.info("BRISC already downloaded and extracted.")
         return brisc_dir
+    if marker.exists():
+        logger.warning("BRISC marker exists but extracted files are missing; redownloading.")
+        marker.unlink(missing_ok=True)
 
     brisc_dir.mkdir(parents=True, exist_ok=True)
 
     # BRISC from Figshare (DOI: 10.6084/m9.figshare.30533120)
     # Direct download URL
-    zip_path = data_dir / "brisc" / "brisc2025.zip"
-    if not (brisc_dir / "classification_task").exists():
+    zip_path = data_dir / "brisc2025.zip"
+    if not has_brisc_classes(brisc_dir):
         _download_file(
             "https://figshare.com/ndownloader/files/55678923",
             zip_path,
@@ -156,14 +163,24 @@ def download_brisc(data_dir: Path) -> Path:
         _extract_zip(zip_path, brisc_dir, desc="Extracting BRISC")
         zip_path.unlink(missing_ok=True)
 
-        # BRISC zip may have nested directory — flatten if needed
-        nested = brisc_dir / "brisc2025"
-        if nested.exists() and not (brisc_dir / "classification_task").exists():
-            for item in nested.iterdir():
-                shutil.move(str(item), str(brisc_dir / item.name))
-            nested.rmdir()
+        # BRISC zip may have nested directory — flatten classification_task if needed.
+        if not has_brisc_classes(brisc_dir):
+            nested_task = next(
+                (p for p in brisc_dir.rglob("classification_task") if p.is_dir()),
+                None,
+            )
+            if nested_task and nested_task.parent != brisc_dir:
+                target = brisc_dir / "classification_task"
+                if target.exists():
+                    shutil.rmtree(target)
+                shutil.move(str(nested_task), str(target))
     else:
         logger.info("BRISC already extracted.")
+
+    if not has_brisc_classes(brisc_dir):
+        raise FileNotFoundError(
+            f"BRISC extraction did not produce classification_task/train and test under {brisc_dir}"
+        )
 
     marker.touch()
     logger.info(f"BRISC ready at {brisc_dir}")
