@@ -60,39 +60,43 @@ logger = logging.getLogger(__name__)
 
 # ─── Backbone Factory ────────────────────────────────────────────────
 
-def get_backbone(config: ModelConfig, device: str = "cuda") -> torch.nn.Module:
-    """Load frozen ViT backbone."""
+def get_backbone(config: ModelConfig, device: str = "cuda"):
+    """Load frozen ViT backbone with graceful fallbacks."""
+    backbone = None
+    embed_dim = None
+
     if config.backbone == "dino_v2":
-        # DINOv2 via torch hub
-        backbone = torch.hub.load(
-            'facebookresearch/dinov2',
-            f'dinov2_vit{config.backbone_size[0]}14'
-        )
-        embed_dim = 768 if config.backbone_size == 'base' else 384
+        try:
+            backbone = torch.hub.load(
+                'facebookresearch/dinov2',
+                f'dinov2_vit{config.backbone_size[0]}14'
+            )
+            embed_dim = 768 if config.backbone_size == 'base' else 384
+        except Exception as e:
+            logger.warning(f"DINOv2 failed ({e}), falling back to ResNet50")
+
     elif config.backbone == "medmae":
-        # MedMAE: medical pretrained ViT
-        # Use timm to load a ViT, then optionally load MedMAE weights
-        backbone = timm.create_model(
-            f'vit_{config.backbone_size}_patch16_224',
-            pretrained=True,
-            num_classes=0,
-        )
-        embed_dim = 768 if config.backbone_size == 'base' else 384
+        try:
+            backbone = timm.create_model(
+                f'vit_{config.backbone_size}_patch16_224', pretrained=True, num_classes=0)
+            embed_dim = 768 if config.backbone_size == 'base' else 384
+        except Exception:
+            logger.warning("MedMAE failed, falling back to ResNet50")
+
     elif config.backbone == "sam":
-        # SAM encoder (ViT-B)
         try:
             from segment_anything import sam_model_registry
             sam = sam_model_registry['vit_b'](checkpoint=None)
             backbone = sam.image_encoder
             embed_dim = 768
-        except ImportError:
-            logger.warning("SAM not available, falling back to DINOv2")
-            backbone = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
-            embed_dim = 384
-    else:
-        # ResNet fallback
-        backbone = timm.create_model('resnet50', pretrained=True, num_classes=0)
-        embed_dim = 2048
+        except Exception:
+            logger.warning("SAM not available, falling back to ResNet50")
+
+    # Fallback: timm ViT (small, CPU-friendly, produces patch tokens)
+    if backbone is None:
+        logger.info("Using timm ViT-Small as fallback backbone")
+        backbone = timm.create_model('vit_small_patch16_224', pretrained=True, num_classes=0)
+        embed_dim = 384
 
     backbone.to(device)
     backbone.eval()

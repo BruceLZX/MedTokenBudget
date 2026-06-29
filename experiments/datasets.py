@@ -223,7 +223,11 @@ class MedMNISTDataset(Dataset):
         self.info = INFO[subset_key.lower()]
         DataClass = getattr(medmnist, subset_key)
 
-        self.dataset = DataClass(split=split, download=download, root=data_dir, size=image_size)
+        # Ensure root directory exists (MedMNIST requires it)
+        root = Path(data_dir).resolve()
+        root.mkdir(parents=True, exist_ok=True)
+
+        self.dataset = DataClass(split=split, download=download, root=str(root), size=image_size)
         self.image_size = image_size
         self.augment = augment and split == 'train'
         self.transform = get_train_transforms(image_size) if self.augment else get_val_transforms(image_size)
@@ -400,20 +404,24 @@ def get_dataloaders(config) -> Dict[str, DataLoader]:
     """Create train/val dataloaders. All datasets auto-download."""
     data_cfg = config.data
 
+    # Resolve to absolute path (avoids relative-path issues on different systems)
+    data_dir = str(Path(data_cfg.data_dir).resolve())
+    Path(data_dir).mkdir(parents=True, exist_ok=True)
+
     ds_map = {
         'medmnist': (MedMNISTDataset, dict(
             subset=data_cfg.medmnist_subset,
             image_size=data_cfg.image_size or 224,
-            data_dir=data_cfg.data_dir,
+            data_dir=data_dir,
         )),
         'isic': (ISICDataset, dict(
             image_size=data_cfg.image_size or 224,
-            data_dir=data_cfg.data_dir,
+            data_dir=data_dir,
             year=data_cfg.isic_year,
         )),
         'brisc': (BRISCDataset, dict(
             image_size=data_cfg.image_size or 224,
-            data_dir=data_cfg.data_dir,
+            data_dir=data_dir,
         )),
     }
 
