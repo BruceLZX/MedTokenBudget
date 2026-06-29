@@ -94,37 +94,41 @@ def _extract_zip(zip_path: Path, dest_dir: Path, desc: str = "Extracting"):
 def download_isic_2019(data_dir: Path) -> Path:
     """Auto-download ISIC 2019 dataset. Returns path to data."""
     isic_dir = data_dir / "isic" / "ISIC_2019"
-    marker = isic_dir / ".downloaded"
-
-    if marker.exists():
-        logger.info("ISIC 2019 already downloaded and extracted.")
-        return isic_dir
-
     isic_dir.mkdir(parents=True, exist_ok=True)
+    img_subdir = isic_dir / "ISIC_2019_Training_Input"
 
-    # ISIC 2019 Training Input (images, ~5 GB)
-    img_zip = data_dir / "isic" / "ISIC_2019_Training_Input.zip"
-    if not (isic_dir / "ISIC_2019_Training_Input").exists():
+    # Fix previous double-nesting bug (must run before any early-return)
+    double_nested = img_subdir / "ISIC_2019_Training_Input"
+    if double_nested.exists() and any(double_nested.iterdir()):
+        logger.info("Fixing double-nested extraction from previous run...")
+        for item in double_nested.iterdir():
+            shutil.move(str(item), str(img_subdir / item.name))
+        double_nested.rmdir()
+
+    # Check if images actually exist (look for JPEGs, not just marker)
+    has_images = img_subdir.exists() and any(img_subdir.glob("*.jpg"))
+
+    if has_images:
+        logger.info(f"ISIC 2019 images ready ({len(list(img_subdir.glob('*.jpg')))} found)")
+    else:
+        # Download and extract
+        img_zip = data_dir / "isic" / "ISIC_2019_Training_Input.zip"
         _download_file(
             "https://isic-challenge-data.s3.amazonaws.com/2019/ISIC_2019_Training_Input.zip",
-            img_zip,
-            desc="ISIC 2019 images (5.2 GB)"
+            img_zip, desc="ISIC 2019 images (5.2 GB)"
         )
-        _extract_zip(img_zip, isic_dir / "ISIC_2019_Training_Input", desc="Extracting ISIC images")
-        img_zip.unlink(missing_ok=True)  # Clean up zip
-    else:
-        logger.info("ISIC 2019 images already extracted.")
+        # Extract to isic_dir (zip has ISIC_2019_Training_Input/ internally)
+        _extract_zip(img_zip, isic_dir, desc="Extracting ISIC images")
+        img_zip.unlink(missing_ok=True)
 
-    # ISIC 2019 Ground Truth (CSV, ~2 MB)
+    # Download ground truth CSV
     gt_path = isic_dir / "ISIC_2019_Training_GroundTruth.csv"
     if not gt_path.exists():
         _download_file(
             "https://isic-challenge-data.s3.amazonaws.com/2019/ISIC_2019_Training_GroundTruth.csv",
-            gt_path,
-            desc="ISIC 2019 labels (2 MB)"
+            gt_path, desc="ISIC 2019 labels (2 MB)"
         )
 
-    marker.touch()
     logger.info(f"ISIC 2019 ready at {isic_dir}")
     return isic_dir
 
@@ -279,20 +283,20 @@ class ISICDataset(Dataset):
         img_dir = isic_path / "ISIC_2019_Training_Input"
         gt_file = isic_path / "ISIC_2019_Training_GroundTruth.csv"
         df = pd.read_csv(gt_file)
+        image_index = {p.stem: p for p in img_dir.rglob("*.jpg")}
 
         images, labels = [], []
         for _, row in df.iterrows():
-            img_name = row['image']
-            if not img_name.endswith('.jpg'):
-                img_name += '.jpg'
-            img_path = img_dir / img_name
-            if img_path.exists():
+            img_path = image_index.get(row['image'])
+            if img_path is not None:
                 images.append(str(img_path))
                 # ISIC 2019 has one-hot columns: MEL, NV, BCC, AK, BKL, DF, VASC, SCC
                 label_cols = ['MEL', 'NV', 'BCC', 'AK', 'BKL', 'DF', 'VASC', 'SCC']
                 label_vals = [row.get(c, 0) for c in label_cols]
                 label = np.argmax(label_vals) if any(label_vals) else 0
                 labels.append(label)
+        if not images:
+            raise RuntimeError(f"No ISIC images found under {img_dir}")
 
         np.random.seed(seed)
         indices = np.random.permutation(len(images))
@@ -345,6 +349,8 @@ class ISICDataset(Dataset):
             m = T.Resize((14, 14))(m)
             m = T.ToTensor()(m).squeeze(0)
             mask = (m > 0.5).float().flatten()
+        if mask is None:
+            return image, label
         return image, label, mask
 
 
@@ -395,7 +401,7 @@ class BRISCDataset(Dataset):
         image = Image.open(self.images[idx]).convert('RGB')
         image = self.transform(image)
         label = torch.tensor(self.labels[idx]).long()
-        return image, label, None
+        return image, label
 
 
 # ─── DataLoader Factory ──────────────────────────────────────────────
