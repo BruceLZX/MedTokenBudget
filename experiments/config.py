@@ -53,10 +53,10 @@ class DataConfig:
     """Dataset configuration."""
     dataset: Literal["medmnist", "isic", "brisc", "all"] = "isic"
     data_dir: str = "./data"
+    image_size: int = 224
 
     # ISIC
     isic_year: int = 2019
-    isic_image_size: int = 224
 
     # BRISC
     brisc_task: Literal["classification", "segmentation"] = "classification"
