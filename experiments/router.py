@@ -320,16 +320,20 @@ class TokenRouter(nn.Module):
         top_indices = None  # only populated in eval mode
 
         if training:
-            # Differentiable top-K via Gumbel-softmax straight-through
+            # Straight-through top-K: hard selection in the forward pass, soft
+            # mask in the backward pass so classification loss trains scorer.
             gumbel_noise = -torch.log(-torch.log(
                 torch.rand_like(scores).clamp(min=1e-8)
             ))
             logits = (scores.log() - (1 - scores).log() + gumbel_noise) / self.temperature
 
             _, top_indices = logits.topk(K, dim=-1, sorted=False)
-            mask = torch.zeros_like(scores)
-            mask.scatter_(1, top_indices, 1.0)
-            selection_mask = mask
+            hard_mask = torch.zeros_like(scores)
+            hard_mask.scatter_(1, top_indices, 1.0)
+
+            soft_mask = torch.softmax(logits, dim=-1) * K
+            soft_mask = soft_mask.clamp(max=1.0)
+            selection_mask = hard_mask + soft_mask - soft_mask.detach()
         else:
             # Hard top-K selection at inference
             _, top_indices = scores.topk(K, dim=-1, sorted=False)
@@ -340,7 +344,7 @@ class TokenRouter(nn.Module):
 
         return {
             'selected_patches': selected_patches,
-            'selected_indices': top_indices if not training else None,
+            'selected_indices': top_indices,
             'selection_mask': selection_mask,
             'kept_ratio': patches.new_full((B,), K / N),
             'num_kept': K,

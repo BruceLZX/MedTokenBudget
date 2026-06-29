@@ -148,9 +148,29 @@ class MedTokenBudgetTrainer:
                 lesion_masks = torch.cat([lesion_masks, padding], dim=1)
             lesion_loss = F.binary_cross_entropy(scores, lesion_masks.float())
 
+        # Diversity loss: penalize if all images in batch get similar score patterns
+        div_loss = torch.tensor(0.0, device=images.device)
+        B = images.shape[0]
+        scores_flat = output['scores']  # [B, N]
+        if self.config.train.diversity_weight > 0 and B > 1:
+            score_norm = F.normalize(scores_flat, dim=-1)
+            pairwise_sim = (score_norm @ score_norm.T).abs()
+            off_diag = pairwise_sim[~torch.eye(B, dtype=torch.bool, device=images.device)]
+            div_loss = off_diag.mean()
+
+        # Attention distillation: DINOv2 feature norm = implicit patch importance
+        attn_loss = torch.tensor(0.0, device=images.device)
+        if self.config.train.attention_distill_weight > 0:
+            with torch.no_grad():
+                teacher = output['patches'].norm(dim=-1)
+                teacher = teacher / teacher.max(dim=-1, keepdim=True).values.clamp(min=1e-8)
+            attn_loss = F.mse_loss(scores_flat, teacher)
+
         total_loss = (self.config.train.cls_loss_weight * cls_loss
                       + self.config.train.budget_reg_weight * budget_reg
-                      + self.config.train.lesion_loc_weight * lesion_loss)
+                      + self.config.train.lesion_loc_weight * lesion_loss
+                      + self.config.train.diversity_weight * div_loss
+                      + self.config.train.attention_distill_weight * attn_loss)
         return total_loss, preds
 
     @torch.no_grad()

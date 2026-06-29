@@ -221,6 +221,7 @@ class MedTokenBudget(nn.Module):
         if return_routing_info:
             output.update({
                 'scores': scores,
+                'patches': patches,  # needed for attention distillation loss
                 'selection_mask': route_result['selection_mask'],
                 'kept_ratio': route_result['kept_ratio'],
                 'num_kept': route_result['num_kept'],

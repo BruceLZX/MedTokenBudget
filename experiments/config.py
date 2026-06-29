@@ -19,8 +19,8 @@ class RouterConfig:
     use_prediction_disagreement: bool = False
 
     # Router architecture
-    router_hidden_dim: int = 128
-    router_num_layers: int = 3
+    router_hidden_dim: int = 256
+    router_num_layers: int = 4
     router_dropout: float = 0.1
 
     # Budget
@@ -30,7 +30,7 @@ class RouterConfig:
 
     # Training
     router_lr: float = 1e-3
-    temperature: float = 1.0           # Gumbel-softmax temperature
+    temperature: float = 0.5           # Gumbel-softmax temperature (lower=sharper)
 
 
 @dataclass
@@ -84,12 +84,14 @@ class TrainConfig:
     cls_loss_weight: float = 1.0
     budget_reg_weight: float = 0.01
     lesion_loc_weight: float = 0.1     # Lesion localization auxiliary loss
+    diversity_weight: float = 0.05     # Anti-collapse: penalize uniform scores
+    attention_distill_weight: float = 0.1  # DINOv2 attention teacher
 
     # Budget curriculum
     budget_curriculum: bool = True     # Gradually decrease budget during training
-    budget_start: float = 1.0
+    budget_start: float = 0.5          # Start at 50% (force scorer to learn early)
     budget_end: float = 0.25
-    budget_anneal_epochs: int = 30
+    budget_anneal_epochs: int = 20
 
     # Mixed precision
     use_amp: bool = True
