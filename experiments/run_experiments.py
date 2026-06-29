@@ -129,35 +129,57 @@ def dynamic_vit_pruning(patches: torch.Tensor, budget: float) -> torch.Tensor:
     return selected
 
 
-def tome_merging(patches: torch.Tensor, budget: float) -> torch.Tensor:
-    """ToMe-style: merge similar patches via bipartite matching."""
-    B, N, D = patches.shape
-    K = max(1, int(N * budget))
-    merge_count = N - K
+def _tome_merge_once(tokens: torch.Tensor, sizes: torch.Tensor, num_merge: int):
+    """One ToMe-style bipartite merge round."""
+    B, N, D = tokens.shape
+    if num_merge <= 0 or N <= 1:
+        return tokens, sizes
 
-    # Simple: pair and average most similar patches
-    # Compute pairwise similarity
-    sim = F.cosine_similarity(
-        patches.unsqueeze(2), patches.unsqueeze(1), dim=-1
-    )  # [B, N, N]
+    src = tokens[:, ::2]
+    dst = tokens[:, 1::2]
+    src_sizes = sizes[:, ::2]
+    dst_sizes = sizes[:, 1::2]
+    S, M = src.shape[1], dst.shape[1]
+    if S == 0 or M == 0:
+        return tokens, sizes
 
-    # Greedy merging
-    merged = patches.clone()
-    mask = torch.ones(B, N, device=patches.device)
+    num_merge = min(num_merge, S)
+    src_norm = F.normalize(src, dim=-1)
+    dst_norm = F.normalize(dst, dim=-1)
+    sim = torch.bmm(src_norm, dst_norm.transpose(1, 2))
+    best_sim, best_dst = sim.max(dim=-1)
+    merge_src = best_sim.topk(num_merge, dim=-1, sorted=False).indices
+    merge_dst = best_dst.gather(1, merge_src)
 
-    for _ in range(merge_count):
-        # Find most similar pair (simplified: take first available)
-        remaining = torch.where(mask)[0]
-        if len(remaining) < 2:
-            break
+    src_values = src.gather(1, merge_src.unsqueeze(-1).expand(-1, -1, D))
+    src_weights = src_sizes.gather(1, merge_src).unsqueeze(-1)
+    dst_weighted = dst * dst_sizes.unsqueeze(-1)
+    dst_weighted.scatter_add_(1, merge_dst.unsqueeze(-1).expand(-1, -1, D), src_values * src_weights)
+    dst_sizes = dst_sizes.scatter_add(1, merge_dst, src_weights.squeeze(-1))
+    dst = dst_weighted / dst_sizes.unsqueeze(-1).clamp(min=1e-6)
 
-    # This is overly simplified; real ToMe is more complex
-    # For now, just drop low-norm patches
-    scores = patches.norm(dim=-1)
-    _, keep_idx = scores.topk(K, dim=-1)
-    selected = torch.gather(patches, 1,
-                           keep_idx.unsqueeze(-1).expand(-1, -1, D))
-    return selected
+    keep_src = torch.ones(B, S, dtype=torch.bool, device=tokens.device)
+    keep_src.scatter_(1, merge_src, False)
+    kept_src = src[keep_src].view(B, S - num_merge, D)
+    kept_src_sizes = src_sizes[keep_src].view(B, S - num_merge)
+
+    merged_tokens = torch.cat([dst, kept_src], dim=1)
+    merged_sizes = torch.cat([dst_sizes, kept_src_sizes], dim=1)
+    return merged_tokens, merged_sizes
+
+
+def tome_merging(patches: torch.Tensor, budget: float, min_tokens: int = 1) -> torch.Tensor:
+    """ToMe-style: recursively merge similar patches instead of dropping tokens."""
+    B, N, _ = patches.shape
+    target_tokens = min(N, max(min_tokens, int(N * budget)))
+    tokens = patches
+    sizes = torch.ones(B, N, device=patches.device, dtype=patches.dtype)
+
+    while tokens.shape[1] > target_tokens:
+        merge_count = tokens.shape[1] - target_tokens
+        tokens, sizes = _tome_merge_once(tokens, sizes, merge_count)
+
+    return tokens
 
 
 def frequency_aware_scores(patches: torch.Tensor) -> torch.Tensor:
@@ -215,7 +237,8 @@ def evaluate_selection_baseline(
             scores = patches.norm(dim=-1)
             pooled = pool_topk(patches, scores, budget, min_tokens)
         elif method == 'tome':
-            pooled = tome_merging(patches, budget).mean(dim=1)
+            merged = tome_merging(patches, budget, min_tokens)
+            pooled = merged.mean(dim=1)
         elif method == 'evit':
             signals = model.scorer.compute_signals(patches, attentions)
             scores = signals['attention'].squeeze(-1)
