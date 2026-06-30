@@ -235,6 +235,10 @@ def baseline_key(method: str, budget: float) -> str:
     return f"{canonical_baseline(method)}@{budget:.2f}"
 
 
+def baseline_head_key(method: str) -> str:
+    return f"{canonical_baseline(method)}@multi_budget"
+
+
 def make_head_like(model: MedTokenBudget) -> torch.nn.Module:
     return copy.deepcopy(model.head)
 
@@ -330,11 +334,15 @@ def train_baseline_head(
     val_loader,
     device: str,
     method: str,
-    budget: float,
+    budget: float | List[float],
     epochs: int,
 ) -> torch.nn.Module:
     """Train a fair independent head for a frozen baseline token distribution."""
     method = canonical_baseline(method)
+    train_budgets = budget if isinstance(budget, list) else [budget]
+    train_budgets = [float(b) for b in train_budgets]
+    eval_budget = 1.0 if method == 'no_pruning' else min(train_budgets)
+    budget_desc = "multi_budget" if len(train_budgets) > 1 else f"{train_budgets[0]:.2f}"
     head = make_head_like(model).to(device)
     optimizer = torch.optim.AdamW(head.parameters(), lr=1e-3, weight_decay=1e-5)
     best_state = copy.deepcopy(head.state_dict())
@@ -350,7 +358,8 @@ def train_baseline_head(
             labels = labels.to(device)
             with torch.no_grad():
                 patches, attentions = model.extract_patches(images)
-                pooled, _ = baseline_pooled_tokens(model, patches, attentions, budget, method)
+                batch_budget = float(np.random.choice(train_budgets))
+                pooled, _ = baseline_pooled_tokens(model, patches, attentions, batch_budget, method)
             logits = head(pooled)
             loss = F.cross_entropy(logits, labels)
             optimizer.zero_grad()
@@ -362,12 +371,12 @@ def train_baseline_head(
             correct += int((logits.argmax(dim=-1) == labels).sum().item())
             total += labels.numel()
 
-        metrics = evaluate_selection_baseline(model, val_loader, device, budget, method, head)
+        metrics = evaluate_selection_baseline(model, val_loader, device, eval_budget, method, head)
         if metrics['accuracy'] > best_acc:
             best_acc = metrics['accuracy']
             best_state = copy.deepcopy(head.state_dict())
         logger.info(
-            f"  train head {baseline_key(method, budget)} epoch {epoch + 1}/{epochs} | "
+            f"  train head {method}@{budget_desc} epoch {epoch + 1}/{epochs} | "
             f"loss={total_loss / max(len(train_loader), 1):.4f} | "
             f"train_acc={correct / max(total, 1):.4f} | val_acc={metrics['accuracy']:.4f}"
         )
@@ -479,31 +488,28 @@ def run_budget_sweep(
             logger.warning(f"Could not load cached baseline heads; retraining: {exc}")
             baseline_head_states = {}
 
-    budget_for_head = lambda method, budget: 1.0 if method == 'no_pruning' else budget
-
-    for budget in budgets:
-        for baseline in baselines:
-            if baseline == 'lats':
-                continue
-            train_budget = budget_for_head(baseline, budget)
-            key = baseline_key(baseline, train_budget)
-            if key in baseline_head_states:
-                continue
-            logger.info(f"Training independent baseline head: {key}")
-            head = train_baseline_head(
-                model=model,
-                train_loader=train_loader,
-                val_loader=val_loader,
-                device=trainer.device,
-                method=baseline,
-                budget=train_budget,
-                epochs=getattr(config, 'baseline_head_epochs', 5),
-            )
-            baseline_head_states[key] = {
-                name: value.detach().cpu()
-                for name, value in head.state_dict().items()
-            }
-            torch.save({'heads': baseline_head_states}, head_path)
+    for baseline in baselines:
+        if baseline == 'lats':
+            continue
+        key = baseline_head_key(baseline)
+        if key in baseline_head_states:
+            continue
+        train_budgets = [1.0] if baseline == 'no_pruning' else budgets
+        logger.info(f"Training independent baseline head: {key}")
+        head = train_baseline_head(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            device=trainer.device,
+            method=baseline,
+            budget=train_budgets,
+            epochs=getattr(config, 'baseline_head_epochs', 5),
+        )
+        baseline_head_states[key] = {
+            name: value.detach().cpu()
+            for name, value in head.state_dict().items()
+        }
+        torch.save({'heads': baseline_head_states}, head_path)
 
     results = {b: {} for b in budgets}
 
@@ -519,8 +525,8 @@ def run_budget_sweep(
         for baseline in baselines:
             if baseline == 'lats':
                 continue
-            eval_budget = budget_for_head(baseline, budget)
-            key = baseline_key(baseline, eval_budget)
+            eval_budget = 1.0 if baseline == 'no_pruning' else budget
+            key = baseline_head_key(baseline)
             head = make_head_like(model).to(trainer.device)
             head.load_state_dict(baseline_head_states[key])
             baseline_metrics = evaluate_selection_baseline(
