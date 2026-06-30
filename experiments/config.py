@@ -124,7 +124,7 @@ class ExperimentConfig:
     baselines: List[str] = field(default_factory=lambda: [
         "no_pruning", "random", "norm_based", "tome", "attention_entropy", "local_contrast", "lats"
     ])
-    baseline_head_epochs: int = 5
+    baseline_head_epochs: int = 30
 
 
 # Presets
