@@ -240,7 +240,12 @@ def baseline_head_key(method: str) -> str:
 
 
 def make_head_like(model: MedTokenBudget) -> torch.nn.Module:
-    return copy.deepcopy(model.head)
+    head = copy.deepcopy(model.head)
+    for module in head.modules():
+        reset = getattr(module, 'reset_parameters', None)
+        if callable(reset):
+            reset()
+    return head
 
 
 def align_lesion_mask(lesion_masks: torch.Tensor, target_tokens: int) -> torch.Tensor:
