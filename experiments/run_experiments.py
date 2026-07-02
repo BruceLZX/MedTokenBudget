@@ -4,7 +4,7 @@ MedTokenBudget — Main experiment runner.
 
 Evaluates lesion-preserving token routing vs. baselines across:
   - Multiple token budgets (10%, 25%, 50%, 75%, 100%)
-  - 3 datasets (ISIC, BRISC, MedMNIST)
+  - 4 datasets (ISIC, BRISC, Kvasir v2, MedMNIST)
   - Fair baselines with independent heads:
     no_pruning, random, norm_based, tome, attention_entropy, local_contrast, lats
 
@@ -46,7 +46,7 @@ from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
 
 from config import (
     ExperimentConfig, RouterConfig, ModelConfig, DataConfig, TrainConfig,
-    ISIC_BASELINE, BRISC_BASELINE, MEDMNIST_QUICK,
+    ISIC_BASELINE, BRISC_BASELINE, KVASIR_BASELINE, MEDMNIST_QUICK,
 )
 from model import MedTokenBudget
 from router import LesionAwareTokenScorer, TokenRouter
@@ -607,7 +607,7 @@ def main():
     parser = argparse.ArgumentParser(description="MedTokenBudget Experiments")
     parser.add_argument('--mode', choices=['quick', 'full', 'sweep', 'ablation', 'all'],
                        default='quick')
-    parser.add_argument('--dataset', choices=['medmnist', 'isic', 'brisc'],
+    parser.add_argument('--dataset', choices=['medmnist', 'isic', 'brisc', 'kvasir'],
                        default='medmnist')
     parser.add_argument('--output_dir', default='./results/med_token_budget')
     parser.add_argument('--device', default='cuda')
@@ -631,6 +631,8 @@ def main():
         config = ISIC_BASELINE
     elif args.dataset == 'brisc':
         config = BRISC_BASELINE
+    elif args.dataset == 'kvasir':
+        config = KVASIR_BASELINE
     else:
         config = MEDMNIST_QUICK
         config.data.medmnist_subset = args.dataset if args.dataset != 'medmnist' else 'pathmnist'

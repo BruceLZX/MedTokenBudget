@@ -1,5 +1,5 @@
 """
-Data loaders for MedTokenBudget: MedMNIST, ISIC, BRISC.
+Data loaders for MedTokenBudget: MedMNIST, ISIC, BRISC, Kvasir v2.
 
 All datasets auto-download on first use — no manual steps needed.
 """
@@ -16,10 +16,25 @@ import zipfile
 import shutil
 import json
 import urllib.request
+import ssl
 
 logger = logging.getLogger(__name__)
 
 # ─── Auto-Download Utilities ──────────────────────────────────────────
+
+def _urlopen_with_cert_fallback(request, timeout=None):
+    """Open URL, retrying with an unverified context for hosts with stale cert chains."""
+    try:
+        return urllib.request.urlopen(request, timeout=timeout)
+    except Exception as exc:
+        if "CERTIFICATE_VERIFY_FAILED" not in str(exc):
+            raise
+        logger.warning(f"TLS certificate verification failed; retrying without verification: {exc}")
+        return urllib.request.urlopen(
+            request,
+            timeout=timeout,
+            context=ssl._create_unverified_context(),
+        )
 
 def _download_file(url: str, dest: Path, desc: str = "Downloading"):
     """Download a file with progress bar and resume support."""
@@ -44,7 +59,7 @@ def _download_file(url: str, dest: Path, desc: str = "Downloading"):
             req.add_header('Range', f'bytes={resume_pos}-')
             logger.info(f"  Resuming from byte {resume_pos}")
 
-        with urllib.request.urlopen(req) as response:
+        with _urlopen_with_cert_fallback(req) as response:
             total = int(response.headers.get('Content-Length', 0))
             mode = 'ab' if resume_pos > 0 else 'wb'
 
@@ -240,6 +255,69 @@ def download_brisc(data_dir: Path) -> Path:
     marker.touch()
     logger.info(f"BRISC ready at {brisc_dir}")
     return brisc_dir
+
+
+def download_kvasir_v2(data_dir: Path) -> Path:
+    """Auto-download Kvasir v2 GI endoscopy classification dataset."""
+    kvasir_dir = data_dir / "kvasir" / "kvasir-dataset-v2"
+    marker = kvasir_dir / ".downloaded"
+    classes = {
+        "dyed-lifted-polyps",
+        "dyed-resection-margins",
+        "esophagitis",
+        "normal-cecum",
+        "normal-pylorus",
+        "normal-z-line",
+        "polyps",
+        "ulcerative-colitis",
+    }
+
+    def has_kvasir_classes(path: Path) -> bool:
+        return all((path / cls).is_dir() for cls in classes)
+
+    if marker.exists() and has_kvasir_classes(kvasir_dir):
+        logger.info("Kvasir v2 already downloaded and extracted.")
+        return kvasir_dir
+    if marker.exists():
+        logger.warning("Kvasir marker exists but extracted files are missing; redownloading.")
+        marker.unlink(missing_ok=True)
+
+    kvasir_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = data_dir / "kvasir" / "kvasir-dataset-v2.zip"
+
+    if not has_kvasir_classes(kvasir_dir):
+        if zip_path.exists() and not zipfile.is_zipfile(zip_path):
+            logger.warning(f"Removing invalid Kvasir archive: {zip_path}")
+            zip_path.unlink()
+        _download_file(
+            "https://datasets.simula.no/downloads/kvasir/kvasir-dataset-v2.zip",
+            zip_path,
+            desc="Kvasir v2 GI endoscopy (2.3 GB)",
+        )
+        if not zipfile.is_zipfile(zip_path):
+            raise zipfile.BadZipFile(f"Downloaded Kvasir archive is not a zip file: {zip_path}")
+        _extract_zip(zip_path, kvasir_dir, desc="Extracting Kvasir v2")
+        zip_path.unlink(missing_ok=True)
+
+        nested = kvasir_dir / "kvasir-dataset-v2"
+        if nested.exists() and has_kvasir_classes(nested):
+            for item in nested.iterdir():
+                target = kvasir_dir / item.name
+                if target.exists():
+                    shutil.rmtree(target) if target.is_dir() else target.unlink()
+                shutil.move(str(item), str(target))
+            nested.rmdir()
+
+    if not has_kvasir_classes(kvasir_dir):
+        found = sorted(p.name for p in kvasir_dir.iterdir() if p.is_dir())
+        raise FileNotFoundError(
+            f"Kvasir v2 extraction did not produce expected class folders under {kvasir_dir}. "
+            f"Found: {found}"
+        )
+
+    marker.touch()
+    logger.info(f"Kvasir v2 ready at {kvasir_dir}")
+    return kvasir_dir
 
 
 def download_with_fallback(download_func, data_dir: Path, fallback_name: str):
@@ -494,6 +572,67 @@ class BRISCDataset(Dataset):
         return image, label
 
 
+# ─── Kvasir v2 Dataset (with auto-download) ─────────────────────────
+
+class KvasirV2Dataset(Dataset):
+    """Kvasir v2 GI endoscopy classification dataset."""
+
+    CLASSES = [
+        "dyed-lifted-polyps",
+        "dyed-resection-margins",
+        "esophagitis",
+        "normal-cecum",
+        "normal-pylorus",
+        "normal-z-line",
+        "polyps",
+        "ulcerative-colitis",
+    ]
+    CLASS_TO_IDX = {c: i for i, c in enumerate(CLASSES)}
+
+    def __init__(self, split: str = 'train', image_size: int = 224,
+                 data_dir: str = './data', augment: bool = False,
+                 train_ratio: float = 0.8, seed: int = 42):
+        self.image_size = image_size
+        self.data_dir = Path(data_dir)
+        self.augment = augment and split == 'train'
+
+        kvasir_path = download_with_fallback(
+            lambda d: download_kvasir_v2(d), self.data_dir, "PathMNIST"
+        )
+        if kvasir_path is None:
+            raise RuntimeError("Kvasir v2 download failed and no compatible fallback is configured.")
+
+        images, labels = [], []
+        for class_name in self.CLASSES:
+            class_dir = kvasir_path / class_name
+            for pattern in ("*.jpg", "*.jpeg", "*.png"):
+                for img_path in class_dir.glob(pattern):
+                    images.append(str(img_path))
+                    labels.append(self.CLASS_TO_IDX[class_name])
+
+        if not images:
+            raise RuntimeError(f"No Kvasir v2 images found under {kvasir_path}")
+
+        rng = np.random.default_rng(seed)
+        indices = rng.permutation(len(images))
+        split_idx = int(len(indices) * train_ratio)
+        idxs = indices[:split_idx] if split == 'train' else indices[split_idx:]
+
+        self.images = [images[int(i)] for i in idxs]
+        self.labels = [labels[int(i)] for i in idxs]
+        self.num_classes = len(self.CLASSES)
+        self.transform = get_train_transforms(image_size) if self.augment else get_val_transforms(image_size)
+        logger.info(f"Kvasir v2 {split}: {len(self.images)} images, {self.num_classes} classes")
+
+    def __len__(self): return len(self.images)
+
+    def __getitem__(self, idx):
+        image = Image.open(self.images[idx]).convert('RGB')
+        image = self.transform(image)
+        label = torch.tensor(self.labels[idx]).long()
+        return image, label
+
+
 # ─── DataLoader Factory ──────────────────────────────────────────────
 
 def get_dataloaders(config) -> Dict[str, DataLoader]:
@@ -522,6 +661,12 @@ def get_dataloaders(config) -> Dict[str, DataLoader]:
         'brisc': (BRISCDataset, dict(
             image_size=data_cfg.image_size or 224,
             data_dir=data_dir,
+        )),
+        'kvasir': (KvasirV2Dataset, dict(
+            image_size=data_cfg.image_size or 224,
+            data_dir=data_dir,
+            train_ratio=data_cfg.train_split,
+            seed=config.seed,
         )),
     }
 

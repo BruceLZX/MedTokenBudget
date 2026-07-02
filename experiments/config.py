@@ -43,7 +43,7 @@ class ModelConfig:
     patch_size: int = 16
 
     # Task head
-    num_classes: int = 8               # ISIC: 8, BRISC: 4, PathMNIST: 9
+    num_classes: int = 8               # ISIC/Kvasir: 8, BRISC: 4, PathMNIST: 9
     head_type: Literal["linear", "mlp", "transformer"] = "mlp"
     head_hidden_dim: int = 256
 
@@ -51,7 +51,7 @@ class ModelConfig:
 @dataclass
 class DataConfig:
     """Dataset configuration."""
-    dataset: Literal["medmnist", "isic", "brisc", "all"] = "isic"
+    dataset: Literal["medmnist", "isic", "brisc", "kvasir", "all"] = "isic"
     data_dir: str = "./data"
     image_size: int = 224
 
@@ -60,6 +60,9 @@ class DataConfig:
 
     # BRISC
     brisc_task: Literal["classification", "segmentation"] = "classification"
+
+    # Kvasir v2
+    kvasir_version: Literal["v2"] = "v2"
 
     # MedMNIST
     medmnist_subset: str = "pathmnist"  # pathmnist, dermamnist, octmnist, etc.
@@ -138,6 +141,12 @@ BRISC_BASELINE = ExperimentConfig(
     name="brisc_baseline",
     data=DataConfig(dataset="brisc"),
     model=ModelConfig(num_classes=4, backbone="dino_v2"),
+)
+
+KVASIR_BASELINE = ExperimentConfig(
+    name="kvasir_baseline",
+    data=DataConfig(dataset="kvasir"),
+    model=ModelConfig(num_classes=8, backbone="dino_v2"),
 )
 
 MEDMNIST_QUICK = ExperimentConfig(
